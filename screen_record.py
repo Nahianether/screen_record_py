@@ -6,75 +6,224 @@ from datetime import datetime
 import time
 import sys
 import argparse
+from PIL import ImageGrab, ImageDraw
+from win32api import GetSystemMetrics
+import win32gui
+import win32con
 
 # Defaults
-DEFAULT_FOLDER = "C:\\Recordings"
-DEFAULT_DURATION = 120
-DEFAULT_FPS = 24
-DEFAULT_RESOLUTION = (1280, 720)
+DEFAULT_FOLDER = "D:\\Recordings"
+DEFAULT_DURATION = 50  # it almost, 600 seconds
+DEFAULT_FPS = 24        # frames per second
+DEFAULT_SLOW_FACTOR = 0.25  # 0.25x speed => 4x slower (was 0.5)
+SCALE_PERCENT = 70    # Increased from 80 to 85 for slightly better quality
+
+# Duration presets in seconds
+DURATION_PRESETS = {
+    "short": 30,      # 30 seconds
+    "medium": 120,    # 2 minutes
+    "long": 300,      # 5 minutes
+    "very-long": 600, # 10 minutes
+    "ultra-long": 1800 # 30 minutes
+}
+
+# Slow motion presets (factor: resulting speed)
+SLOW_MOTION_PRESETS = {
+    "normal": 1.0,      # 1x (normal speed)
+    "mild": 0.5,        # 2x slower
+    "slow": 0.25,       # 4x slower
+    "very-slow": 0.125, # 8x slower
+    "ultra-slow": 0.0625 # 16x slower
+}
+
+# Screen size
+screen_width = GetSystemMetrics(0)
+screen_height = GetSystemMetrics(1)
+scaled_width = int(screen_width * SCALE_PERCENT / 100)
+scaled_height = int(screen_height * SCALE_PERCENT / 100)
+DEFAULT_RESOLUTION = (scaled_width, scaled_height)
 
 def ensure_folder(path):
-    """Ensure parent folder exists for the given file path."""
     folder = os.path.dirname(path)
     if folder and not os.path.exists(folder):
         os.makedirs(folder)
 
 def get_timestamped_filename(folder):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(folder, f"recording_{timestamp}.mp4")
+    return os.path.join(folder, f"recording_{timestamp}.webm")
 
 def parse_resolution(res_str):
-    """Parse resolution string '1280x720' into a tuple."""
     try:
-        width, height = map(int, res_str.lower().split("x"))
-        return (width, height)
+        width, height = map(int, res_str.lower().split('x'))
+        return width, height
     except:
-        raise argparse.ArgumentTypeError("Resolution must be in the format WIDTHxHEIGHT (e.g., 1280x720)")
+        raise argparse.ArgumentTypeError("Resolution must be in WIDTHxHEIGHT format (e.g. 1280x720)")
 
-def record_clip(filename, duration, fps, resolution):
+def parse_slow_preset(preset):
+    if preset in SLOW_MOTION_PRESETS:
+        return SLOW_MOTION_PRESETS[preset]
+    raise argparse.ArgumentTypeError(f"Unknown preset. Choose from: {', '.join(SLOW_MOTION_PRESETS.keys())}")
+
+def parse_duration_preset(preset):
+    if preset in DURATION_PRESETS:
+        return DURATION_PRESETS[preset]
+    raise argparse.ArgumentTypeError(f"Unknown duration preset. Choose from: {', '.join(DURATION_PRESETS.keys())}")
+
+def get_cursor_position():
+    """Get current cursor position"""
+    try:
+        cursor_pos = win32gui.GetCursorPos()
+        return cursor_pos
+    except:
+        return None
+
+def draw_cursor_on_image(img, cursor_pos, scale_x, scale_y):
+    """Draw cursor on the image with transparent yellow color"""
+    if cursor_pos is None:
+        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    
+    # Scale cursor position according to image scale
+    cursor_x = int(cursor_pos[0] * scale_x)
+    cursor_y = int(cursor_pos[1] * scale_y)
+    
+    # Convert PIL to cv2 format for drawing
+    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    
+    # Create overlay for transparency
+    overlay = img_cv.copy()
+    
+    # Draw transparent yellow cursor (BGR format: Yellow = (0, 255, 255))
+    cursor_size = 12
+    cv2.circle(overlay, (cursor_x, cursor_y), cursor_size, (0, 255, 255), -1)  # Yellow fill only
+    
+    # Apply transparency (0.2 = 20% opaque, 80% transparent)
+    alpha = 0.2
+    img_final = cv2.addWeighted(overlay, alpha, img_cv, 1 - alpha, 0)
+    
+    return img_final
+
+def record_clip(filename, duration, fps, resolution, slow_factor):
     ensure_folder(filename)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(filename, fourcc, fps, resolution)
+    recording_fps = fps
+    output_fps = fps * slow_factor
+
+    # High quality codec settings
+    fourcc = cv2.VideoWriter_fourcc(*'VP90')  # VP9 for best compression
+    out = cv2.VideoWriter(filename, fourcc, output_fps, resolution)
     if not out.isOpened():
         print(f"Error: Could not open video writer for {filename}")
         sys.exit(1)
 
-    total_frames = int(fps * duration)
-    frame_interval = 1 / fps
+    total_frames = int(recording_fps * duration)
+    frame_interval = 1.0 / recording_fps
+    final_video_duration = duration / slow_factor
+    
+    # Calculate scale factors for cursor positioning
+    scale_x = resolution[0] / screen_width
+    scale_y = resolution[1] / screen_height
+    
+    print(f"Recording clip: {filename}")
+    print(f"Recording duration: {duration}s ({duration/60:.1f} minutes)")
+    print(f"Total frames to capture: {total_frames}")
+    print(f"Recording FPS: {recording_fps}")
+    print(f"Output video FPS: {output_fps:.2f}")
+    print(f"Final video duration: {final_video_duration:.2f}s ({final_video_duration/60:.1f} minutes)")
+    print(f"Slow motion factor: {slow_factor}x")
+    print(f"Resolution: {resolution[0]}x{resolution[1]} (Quality: {SCALE_PERCENT}%)")
+    print("Cursor will be visible in recording (Transparent Yellow)")
+    print("Press Ctrl+C to stop early...")
+    
+    # Show calculation for user understanding
+    if slow_factor < 1.0:
+        slowdown_ratio = 1 / slow_factor
+        print(f"Note: Video will be {slowdown_ratio:.1f}x slower than real-time")
 
-    print(f"Recording clip: {filename} ({total_frames} frames at {fps} FPS, {resolution[0]}x{resolution[1]})")
     start_time = time.time()
-
-    for _ in range(total_frames):
-        frame_start = time.time()
-
-        screenshot = pyautogui.screenshot()
-        frame = np.array(screenshot)
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        frame = cv2.resize(frame, resolution)
-        out.write(frame)
-
-        elapsed = time.time() - frame_start
-        time.sleep(max(0, frame_interval - elapsed))
-
-    out.release()
-    duration_actual = time.time() - start_time
-    print(f"Finished recording: {filename} (Actual duration: {duration_actual:.2f}s)")
-
-def main():
-    parser = argparse.ArgumentParser(description="Screen Recorder")
-    parser.add_argument("--output", help="Output path for .mp4 file")
-    parser.add_argument("--duration", type=int, default=DEFAULT_DURATION, help="Recording duration in seconds")
-    parser.add_argument("--fps", type=int, default=DEFAULT_FPS, help="Frames per second")
-    parser.add_argument("--resolution", type=parse_resolution, default=DEFAULT_RESOLUTION,
-                        help="Output resolution (format: WIDTHxHEIGHT, e.g. 1280x720)")
-    args = parser.parse_args()
-
-    output_path = args.output or get_timestamped_filename(DEFAULT_FOLDER)
+    last_progress_time = start_time  # Track last progress time
     
     try:
-        record_clip(output_path, args.duration, args.fps, args.resolution)
+        for frame_num in range(total_frames):
+            frame_start_time = time.time()
+            
+            # Capture screen
+            img = ImageGrab.grab(bbox=(0, 0, screen_width, screen_height))
+            # Use LANCZOS resampling for superior quality resize
+            img = img.resize(resolution, resample=3)  # LANCZOS = 3 for best quality
+            
+            # Get cursor position and draw it
+            cursor_pos = get_cursor_position()
+            img_final = draw_cursor_on_image(img, cursor_pos, scale_x, scale_y)
+            
+            out.write(img_final)
+            
+            # Maintain precise timing
+            frame_processing_time = time.time() - frame_start_time
+            sleep_time = frame_interval - frame_processing_time
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            
+            # Show progress every second
+            if (frame_num + 1) % recording_fps == 0:
+                progress = (frame_num + 1) // recording_fps
+                current_time = time.time()
+                seconds_completed = current_time - start_time
+                time_gap = current_time - last_progress_time
+                last_progress_time = current_time
+                
+                print(f"Progress: {progress}/{duration} seconds recorded, and completed seconds = {seconds_completed:.2f}s  [time gap = {time_gap:.2f}s]")
+
+    except KeyboardInterrupt:
+        print("\nRecording stopped by user!")
+    
+    actual_recording_time = time.time() - start_time
+    out.release()
+    
+    final_video_duration = duration / slow_factor
+    
+    print(f"\n=== Recording Complete ===")
+    print(f"Actual recording time: {actual_recording_time:.2f}s")
+    print(f"Expected recording time: {duration}s")
+    print(f"Final video duration: {final_video_duration:.2f}s")
+    print(f"Slow motion factor: {slow_factor}x")
+    print(f"Enhanced Quality: {SCALE_PERCENT}% of original resolution")
+    print(f"Cursor visibility: Enabled (Transparent Yellow)")
+    print(f"File saved: {filename}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Screen Recorder with Slow Motion Support")
+    parser.add_argument("--output", help="Output path for .webm file")
+    parser.add_argument("--duration", type=int, default=DEFAULT_DURATION, help="Recording duration in seconds")
+    parser.add_argument("--duration-preset", type=parse_duration_preset,
+                        help=f"Duration preset. Options: {', '.join(DURATION_PRESETS.keys())}")
+    parser.add_argument("--fps", type=int, default=DEFAULT_FPS, help="Frames per second to capture")
+    parser.add_argument("--resolution", type=parse_resolution, default=DEFAULT_RESOLUTION,
+                        help="Output resolution (format: WIDTHxHEIGHT, e.g. 1280x720)")
+    parser.add_argument("--slow-factor", type=float, default=DEFAULT_SLOW_FACTOR,
+                        help="Slow motion factor (smaller = slower, e.g. 0.25 = 4x slower video)")
+    parser.add_argument("--preset", type=parse_slow_preset,
+                        help=f"Slow motion preset. Options: {', '.join(SLOW_MOTION_PRESETS.keys())}")
+
+    args = parser.parse_args()
+    
+    # Duration preset overrides duration
+    duration = args.duration_preset if args.duration_preset is not None else args.duration
+    
+    # If preset is specified, it overrides the slow-factor
+    slow_factor = args.preset if args.preset is not None else args.slow_factor
+    output_path = args.output or get_timestamped_filename(DEFAULT_FOLDER)
+
+    # Show calculation before starting
+    final_duration = duration / slow_factor
+    print(f"\n=== Recording Plan ===")
+    print(f"Input duration: {duration}s ({duration/60:.1f} minutes)")
+    print(f"Slow factor: {slow_factor}x")
+    print(f"Output video duration: {final_duration:.1f}s ({final_duration/60:.1f} minutes)")
+    print(f"File: {output_path}")
+    print("=" * 25)
+
+    try:
+        record_clip(output_path, duration, args.fps, args.resolution, slow_factor)  # Fixed: use duration instead of args.duration
     except KeyboardInterrupt:
         print("Recording interrupted by user.")
     except Exception as e:
