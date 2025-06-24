@@ -121,21 +121,31 @@ def draw_cursor_on_image(img, cursor_pos, scale_x, scale_y):
         return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 def record_clip(filename, duration, fps, resolution, slow_factor):
+    out = None
     try:
         ensure_folder(filename)
         
         recording_fps = fps
         output_fps = fps * slow_factor
 
-        # High quality codec settings
-        fourcc = cv2.VideoWriter_fourcc(*'VP90')
+        # Use more compatible codec for better reliability
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # More reliable than VP90
+        
+        # Change extension to .mp4 for better compatibility
+        if filename.endswith('.webm'):
+            filename = filename.replace('.webm', '.mp4')
+        elif not filename.endswith('.mp4'):
+            filename = filename + '.mp4'
+            
         out = cv2.VideoWriter(filename, fourcc, output_fps, resolution)
         if not out.isOpened():
             print(f"Error: Could not open video writer for {filename}")
-            print(f"Trying alternative codec...")
+            print(f"Trying XVID codec...")
             # Try alternative codec
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
-            filename_alt = filename.replace('.webm', '.avi')
+            filename_alt = filename.replace('.mp4', '.avi')
+            if out is not None:
+                out.release()
             out = cv2.VideoWriter(filename_alt, fourcc, output_fps, resolution)
             if not out.isOpened():
                 raise Exception("Could not initialize video writer with any codec")
@@ -207,22 +217,44 @@ def record_clip(filename, duration, fps, resolution, slow_factor):
         print("\nRecording stopped by user!")
     except Exception as e:
         print(f"Error during recording: {e}")
+        import traceback
+        traceback.print_exc()
         raise
     finally:
-        if 'out' in locals():
-            out.release()
+        # Ensure proper cleanup
+        if out is not None:
+            try:
+                out.release()
+                print("Video writer released successfully")
+            except Exception as e:
+                print(f"Warning: Error releasing video writer: {e}")
+        
+        # Force cleanup of OpenCV resources (skip destroyAllWindows for headless)
+        # cv2.destroyAllWindows() causes issues in headless/noconsole environments
     
-    actual_recording_time = time.time() - start_time
-    
-    final_video_duration = duration / slow_factor
-    
-    print(f"\n=== Recording Complete ===")
-    print(f"Actual recording time: {actual_recording_time:.2f}s")
-    print(f"Expected recording time: {duration}s")
-    print(f"Final video duration: {final_video_duration:.2f}s")
-    print(f"Slow motion factor: {slow_factor}x")
-    print(f"Enhanced Quality: {SCALE_PERCENT}% of original resolution")
-    print(f"File saved: {filename}")
+    try:
+        actual_recording_time = time.time() - start_time
+        final_video_duration = duration / slow_factor
+        
+        print(f"\n=== Recording Complete ===")
+        print(f"Actual recording time: {actual_recording_time:.2f}s")
+        print(f"Expected recording time: {duration}s")
+        print(f"Final video duration: {final_video_duration:.2f}s")
+        print(f"Slow motion factor: {slow_factor}x")
+        print(f"Enhanced Quality: {SCALE_PERCENT}% of original resolution")
+        print(f"File saved: {filename}")
+        
+        # Verify file was created and has content
+        if os.path.exists(filename):
+            file_size = os.path.getsize(filename)
+            print(f"File size: {file_size} bytes")
+            if file_size == 0:
+                print("Warning: Output file is empty!")
+        else:
+            print("Warning: Output file was not created!")
+            
+    except Exception as e:
+        print(f"Warning: Error in final reporting: {e}")
 
 def main():
     try:
@@ -264,6 +296,7 @@ def main():
         record_clip(output_path, duration, args.fps, args.resolution, slow_factor)
         
         print("Recording completed successfully")
+        
         return 0
         
     except KeyboardInterrupt:
@@ -274,8 +307,6 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
-    finally:
-        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     sys.exit(main())
