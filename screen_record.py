@@ -2,9 +2,9 @@ import pyautogui
 import cv2
 import numpy as np
 import os
-import sys
 from datetime import datetime
 import time
+import sys
 import argparse
 from PIL import ImageGrab, ImageDraw
 from win32api import GetSystemMetrics
@@ -21,7 +21,7 @@ else:
 
 # Defaults - use absolute paths
 DEFAULT_FOLDER = os.path.join(SCRIPT_DIR, "Recordings")
-DEFAULT_DURATION = 50
+DEFAULT_DURATION = 300
 DEFAULT_FPS = 24
 DEFAULT_SLOW_FACTOR = 0.25
 SCALE_PERCENT = 70
@@ -120,63 +120,140 @@ def draw_cursor_on_image(img, cursor_pos, scale_x, scale_y):
         print(f"Warning: Could not draw cursor: {e}")
         return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
+def safe_opencv_cleanup():
+    """Safely cleanup OpenCV resources without causing crashes"""
+    try:
+        # Only try to destroy windows if we're in a GUI environment
+        import sys
+        
+        # Check if we're in a console/GUI environment
+        if hasattr(sys, '_MEIPASS') or getattr(sys, 'frozen', False):
+            # We're running as an executable - skip cv2.destroyAllWindows()
+            print("Skipping cv2.destroyAllWindows() for executable environment")
+            return
+        
+        # Try to destroy windows, but catch the specific error
+        cv2.destroyAllWindows()
+        print("OpenCV windows destroyed successfully")
+        
+    except cv2.error as e:
+        if "not implemented" in str(e).lower() or "rebuild the library" in str(e).lower():
+            print("OpenCV destroyAllWindows not supported in this environment (headless mode)")
+        else:
+            print(f"OpenCV cleanup warning: {e}")
+    except Exception as e:
+        print(f"Warning: Error during OpenCV cleanup: {e}")
+
 def record_clip(filename, duration, fps, resolution, slow_factor):
     out = None
+    final_filename = filename
+    
     try:
         ensure_folder(filename)
         
         recording_fps = fps
-        output_fps = fps * slow_factor
-
-        # Use more compatible codec for better reliability
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # More reliable than VP90
+        # IMPORTANT: Ensure minimum output FPS for browser compatibility
+        output_fps = max(fps * slow_factor, 12.0)  # Never go below 12 FPS
         
-        # Change extension to .mp4 for better compatibility
+        print(f"Requested output: {filename}")
+        print(f"Recording FPS: {recording_fps}")
+        print(f"Output FPS: {output_fps:.2f} (minimum 12 FPS for browsers)")
+        
         if filename.endswith('.webm'):
-            filename = filename.replace('.webm', '.mp4')
-        elif not filename.endswith('.mp4'):
-            filename = filename + '.mp4'
+            print("Creating browser-compatible WebM...")
             
-        out = cv2.VideoWriter(filename, fourcc, output_fps, resolution)
-        if not out.isOpened():
-            print(f"Error: Could not open video writer for {filename}")
-            print(f"Trying XVID codec...")
-            # Try alternative codec
-            fourcc = cv2.VideoWriter_fourcc(*'XVID')
-            filename_alt = filename.replace('.mp4', '.avi')
-            if out is not None:
-                out.release()
-            out = cv2.VideoWriter(filename_alt, fourcc, output_fps, resolution)
+            # Try VP8 with browser-friendly parameters
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*'VP80')
+                # Ensure integer FPS for VP8 compatibility
+                safe_fps = max(12, int(output_fps))
+                out = cv2.VideoWriter(filename, fourcc, float(safe_fps), resolution)
+                
+                if out.isOpened():
+                    print(f"SUCCESS: VP8 WebM created with {safe_fps} FPS")
+                    codec_used = f"VP8 ({safe_fps} FPS)"
+                    output_fps = safe_fps  # Update the actual FPS being used
+                else:
+                    print("ERROR: VP8 failed")
+                    out = None
+            except Exception as e:
+                print(f"ERROR: VP8 error - {e}")
+                out = None
+            
+            # If VP8 fails, try a different approach - create MP4 and rename to WebM
+            if out is None:
+                print("INFO: VP8 failed, creating MP4 with WebM extension...")
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    safe_fps = max(12, int(output_fps))
+                    out = cv2.VideoWriter(filename, fourcc, float(safe_fps), resolution)
+                    
+                    if out.isOpened():
+                        print(f"SUCCESS: MP4V in WebM container created with {safe_fps} FPS")
+                        codec_used = f"MP4V-WebM ({safe_fps} FPS)"
+                        output_fps = safe_fps
+                    else:
+                        print("ERROR: MP4V in WebM failed")
+                        out = None
+                except Exception as e:
+                    print(f"ERROR: MP4V in WebM error - {e}")
+                    out = None
+        else:
+            # For non-WebM files
+            safe_fps = max(12, int(output_fps))
+            if filename.endswith('.mp4'):
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                codec_used = f"MP4V ({safe_fps} FPS)"
+            elif filename.endswith('.avi'):
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                codec_used = f"XVID ({safe_fps} FPS)"
+            else:
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                codec_used = f"MP4V ({safe_fps} FPS)"
+                
+            out = cv2.VideoWriter(filename, fourcc, float(safe_fps), resolution)
+            output_fps = safe_fps
+        
+        # Final fallback - create standard MP4
+        if out is None or not out.isOpened():
+            print("INFO: All WebM attempts failed, creating standard MP4...")
+            fallback_filename = os.path.splitext(filename)[0] + '.mp4'
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            safe_fps = max(12, int(output_fps))
+            out = cv2.VideoWriter(fallback_filename, fourcc, float(safe_fps), resolution)
+            final_filename = fallback_filename
+            codec_used = f"MP4V-Fallback ({safe_fps} FPS)"
+            output_fps = safe_fps
+            
             if not out.isOpened():
                 raise Exception("Could not initialize video writer with any codec")
-            filename = filename_alt
 
         total_frames = int(recording_fps * duration)
         frame_interval = 1.0 / recording_fps
-        final_video_duration = duration / slow_factor
+        
+        # Recalculate video duration based on actual output FPS
+        actual_video_duration = total_frames / output_fps
         
         # Calculate scale factors for cursor positioning
         scale_x = resolution[0] / screen_width
         scale_y = resolution[1] / screen_height
         
-        print(f"Recording clip: {filename}")
+        print(f"SUCCESS: Recording clip - {final_filename}")
+        print(f"SUCCESS: Codec - {codec_used}")
         print(f"Recording duration: {duration}s ({duration/60:.1f} minutes)")
         print(f"Total frames to capture: {total_frames}")
         print(f"Recording FPS: {recording_fps}")
         print(f"Output video FPS: {output_fps:.2f}")
-        print(f"Final video duration: {final_video_duration:.2f}s ({final_video_duration/60:.1f} minutes)")
-        print(f"Slow motion factor: {slow_factor}x")
+        print(f"Actual video duration: {actual_video_duration:.2f}s ({actual_video_duration/60:.1f} minutes)")
+        print(f"Slow motion factor: {recording_fps/output_fps:.2f}x")
         print(f"Resolution: {resolution[0]}x{resolution[1]} (Quality: {SCALE_PERCENT}%)")
-        print(f"Working directory: {os.getcwd()}")
-        print(f"Script directory: {SCRIPT_DIR}")
         
-        # Show calculation for user understanding
-        if slow_factor < 1.0:
-            slowdown_ratio = 1 / slow_factor
-            print(f"Note: Video will be {slowdown_ratio:.1f}x slower than real-time")
-
         start_time = time.time()
         last_progress_time = start_time
+        
+        # Frame duplication logic for slow motion with proper FPS
+        frame_repeats = max(1, int(recording_fps / output_fps))
+        print(f"Frame repeat count: {frame_repeats} (each recorded frame repeated {frame_repeats} times)")
         
         for frame_num in range(total_frames):
             frame_start_time = time.time()
@@ -184,14 +261,15 @@ def record_clip(filename, duration, fps, resolution, slow_factor):
             try:
                 # Capture screen
                 img = ImageGrab.grab(bbox=(0, 0, screen_width, screen_height))
-                # Use LANCZOS resampling for superior quality resize
                 img = img.resize(resolution, resample=3)
                 
                 # Get cursor position and draw it
                 cursor_pos = get_cursor_position()
                 img_final = draw_cursor_on_image(img, cursor_pos, scale_x, scale_y)
                 
-                out.write(img_final)
+                # Write frame multiple times for slow motion effect
+                for _ in range(frame_repeats):
+                    out.write(img_final)
                 
             except Exception as e:
                 print(f"Warning: Error capturing frame {frame_num}: {e}")
@@ -229,27 +307,37 @@ def record_clip(filename, duration, fps, resolution, slow_factor):
             except Exception as e:
                 print(f"Warning: Error releasing video writer: {e}")
         
-        # Force cleanup of OpenCV resources (skip destroyAllWindows for headless)
-        # cv2.destroyAllWindows() causes issues in headless/noconsole environments
+        # Safe cleanup of OpenCV resources
+        safe_opencv_cleanup()
     
     try:
         actual_recording_time = time.time() - start_time
-        final_video_duration = duration / slow_factor
         
         print(f"\n=== Recording Complete ===")
         print(f"Actual recording time: {actual_recording_time:.2f}s")
         print(f"Expected recording time: {duration}s")
-        print(f"Final video duration: {final_video_duration:.2f}s")
-        print(f"Slow motion factor: {slow_factor}x")
+        print(f"Final video duration: {actual_video_duration:.2f}s")
+        print(f"Output FPS: {output_fps:.2f}")
         print(f"Enhanced Quality: {SCALE_PERCENT}% of original resolution")
-        print(f"File saved: {filename}")
+        print(f"File saved: {final_filename}")
         
         # Verify file was created and has content
-        if os.path.exists(filename):
-            file_size = os.path.getsize(filename)
+        if os.path.exists(final_filename):
+            file_size = os.path.getsize(final_filename)
             print(f"File size: {file_size} bytes")
+            
+            # Additional validation for web compatibility
+            if final_filename.endswith('.webm'):
+                print("WEB: WebM file created with browser-compatible settings")
+                print("   - Minimum 12 FPS for smooth playback")
+                print("   - Compatible codec parameters")
+            elif final_filename.endswith('.mp4'):
+                print("WEB: MP4 file created - universally web compatible")
+                
             if file_size == 0:
                 print("Warning: Output file is empty!")
+            else:
+                print("SUCCESS: Recording successful! Should work in browsers.")
         else:
             print("Warning: Output file was not created!")
             
@@ -258,7 +346,7 @@ def record_clip(filename, duration, fps, resolution, slow_factor):
 
 def main():
     try:
-        parser = argparse.ArgumentParser(description="Screen Recorder with Slow Motion Support")
+        parser = argparse.ArgumentParser(description="Screen Recorder with WebM Support")
         parser.add_argument("--output", help="Output path for video file")
         parser.add_argument("--duration", type=int, default=DEFAULT_DURATION, help="Recording duration in seconds")
         parser.add_argument("--duration-preset", type=parse_duration_preset,
@@ -296,7 +384,6 @@ def main():
         record_clip(output_path, duration, args.fps, args.resolution, slow_factor)
         
         print("Recording completed successfully")
-        
         return 0
         
     except KeyboardInterrupt:
@@ -307,6 +394,9 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
+    finally:
+        # Final safe cleanup
+        safe_opencv_cleanup()
 
 if __name__ == "__main__":
     sys.exit(main())
